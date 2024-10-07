@@ -1,0 +1,192 @@
+---
+title: "Store Sales - Time Series Forecasting"
+author: "NJUGUNA J.M"
+date: "2024-10-07"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+
+# Load required libraries
+library(data.table)
+library(dplyr)
+library(ggplot2)
+library(forecast)
+library(caret)
+library(zoo)
+library(lubridate)
+```
+
+INTRODUCTION:
+
+In this project, we aim to predict sales for thousands of products in Favorita grocery stores using time-series forecasting with machine learning.
+
+Loading and Exploring the Data:
+First let's load the dataset
+
+```{r}
+# Load the train and test datasets
+train <- read_csv("train.csv")
+test <- read_csv("test.csv")
+
+# Load supplementary data
+stores <- read_csv("stores.csv")
+oil <- read_csv("oil.csv")
+holidays_events <- read_csv("holidays_events.csv")
+
+# check the structure of the dataset
+str(train)
+str(test)
+str(holidays)
+str(oil)
+str(stores)
+```
+
+Data Preprocessing:
+We will perform feature engineering, handle missing values, and create lag features for the dataset.
+
+   Feature Engineering (Including lagged sales and holiday indicators)
+```{r}
+# Convert date column to Date type
+train$date <- as.Date(train$date)
+test$date <- as.Date(test$date)
+
+# Add year, month, and weekday features
+train$year <- year(train$date)
+train$month <- month(train$date)
+train$day <- day(train$date)
+train$weekday <- wday(train$date)
+
+test$year <- year(test$date)
+test$month <- month(test$date)
+test$day <- day(test$date)
+test$weekday <- wday(test$date)
+
+# Merge holidays and oil data
+train <- merge(train, holidays, by = "date", all.x = TRUE)
+train <- merge(train, oil, by = "date", all.x = TRUE)
+test <- merge(test, holidays, by = "date", all.x = TRUE)
+test <- merge(test, oil, by = "date", all.x = TRUE)
+
+# Create a holiday indicator (1 = holiday, 0 = no event)
+train$holiday_indicator <- ifelse(is.na(train$holiday) | train$holiday == "No Event", 0, 1)
+test$holiday_indicator <- ifelse(is.na(test$holiday) | test$holiday == "No Event", 0, 1)
+
+# Create lag features (example: 1-day lag)
+train <- train %>%
+  group_by(store_nbr, family) %>%
+  arrange(date) %>%
+  mutate(lag_1 = lag(sales, 1), lag_7 = lag(sales, 7), lag_30 = lag(sales, 30) )
+
+# To handle later in the model fitting
+test$lag_7 <- NA  
+test$lag_1 <- NA 
+test$lag_30 <- NA
+```
+  Handle missing values
+```{r}
+# Use na.locf() to forward-fill missing lag values in train data
+train$lag_1 <- na.locf(train$lag_1, na.rm = FALSE)
+train$lag_7 <- na.locf(train$lag_7, na.rm = FALSE)
+train$lag_30 <- na.locf(train$lag_30, na.rm = FALSE)
+
+# In test data, we will create lag features during prediction.
+```
+
+Model Training with ARIMA:
+We will now train an ARIMA model for each store_nbr and family. We’ll use the auto.arima() function to automatically select the best ARIMA model for each time-series.
+
+  Select Time-Series Data:
+We need to group the data by store_nbr and family to train a separate ARIMA model for each product family in each store.
+```{r}
+
+# Grouping data by store and product family for ARIMA modeling
+store_family_groups <- unique(train[, .(store_nbr, family)])
+
+# Create a list to store ARIMA models for each group
+arima_models <- list()
+```
+
+  Train ARIMA Models:
+We will loop over each store_nbr and family and fit an ARIMA model on the sales data.
+
+```{r}
+for (i in 1:nrow(store_family_groups)) {
+  store_nbr <- store_family_groups$store_nbr[i]
+  family <- store_family_groups$family[i]
+  
+  # Filter data for this group
+  train_subset <- train %>% filter(store_nbr == store_nbr, family == family)
+  
+  # Ensure data is ordered by date
+  train_subset <- train_subset %>% arrange(date)
+  
+  # Create a time-series object
+  ts_data <- ts(train_subset$sales, frequency = 365, start = c(min(train_subset$year), min(train_subset$month)))
+  
+  # Fit ARIMA model using auto.arima()
+  arima_model <- auto.arima(ts_data)
+  
+  # Store the ARIMA model
+  arima_models[[paste(store_nbr, family, sep = "_")]] <- arima_model
+}
+```
+ Examine a Fitted Model:
+We can examine one of the fitted ARIMA models for a specific store and family.
+
+```{r}
+# check ARIMA model for store 1, family 'Dairy'
+arima_models[["1_Dairy"]]
+```
+ Model Evaluation:
+Evaluate the model using time-series cross-validation
+
+```{r}
+# forecasting sales for the next 15 days using one ARIMA model (store 1, Dairy family)
+store_nbr <- 1
+family <- "Dairy"
+arima_model <- arima_models[[paste(store_nbr, family, sep = "_")]]
+forecasted_sales <- forecast(arima_model, h = 15)
+plot(forecasted_sales)
+```
+ Forecasting on Test Data:
+Use the fitted ARIMA models to predict sales for each store_nbr and family in the test dataset.
+
+```{r}
+# Initialize a dataframe to store test predictions
+test$predicted_sales <- NA
+
+for (i in 1:nrow(store_family_groups)) {
+  store_nbr <- store_family_groups$store_nbr[i]
+  family <- store_family_groups$family[i]
+  
+  # Filter test data for this group
+  test_subset <- test %>% filter(store_nbr == store_nbr, family == family)
+  
+  # Get the fitted ARIMA model
+  arima_model <- arima_models[[paste(store_nbr, family, sep = "_")]]
+  
+  # Forecast sales for the next 15 days
+  forecasted_sales <- forecast(arima_model, h = nrow(test_subset))
+  
+  # Assign forecasted sales to the test data
+  test$predicted_sales[test$store_nbr == store_nbr & test$family == family] <- forecasted_sales$mean
+  
+}
+```
+
+ Conclusion:
+In this project, we used ARIMA to predict sales for products across various Favorita grocery stores in Ecuador. We explored time-series data and successfully trained ARIMA models for accurate forecasting.
+```{r}
+
+### Key Steps Included:
+- **Data Preprocessing**: Feature engineering, handling missing values, and preparing the data.
+- **ARIMA Model Training**: Fit an ARIMA model for product family in each store using `auto.arima()`.
+- **Forecasting**: Use the fitted ARIMA models to forecast sales for the test set.
+
+
+
+
+
+
